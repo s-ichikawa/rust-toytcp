@@ -20,18 +20,33 @@ const MSS: usize = 1460;
 const PORT_RANGE: Range<u16> = 40000..60000;
 
 pub struct TCP {
-    sockets: HashMap<SockID, Socket>,
+    sockets: RwLock<HashMap<SockID, Socket>>,
+    event_condvar: (Mutex<Option<TCPEvent>>, Condvar),
 }
 
 impl TCP {
-    pub fn new() -> Self {
-        let sockets = HashMap::new();
-        let tcp = Self { sockets };
+    pub fn new() -> Arc<Self> {
+        let sockets = RwLock::new(HashMap::new());
+        let tcp = Arc::new(Self {
+            sockets,
+            event_condvar: (Mutex::new(None), Condvar::new()),
+        });
+        let cloned_tcp = tcp.clone();
+        std::thread::spawn(move || {
+            cloned_tcp.receive_handler().unwrap();
+        });
         tcp
     }
 
     fn select_unused_port(&self, rng: &mut ThreadRng) -> Result<u16> {
-        Ok(33445)
+        for _ in 0..(PORT_RANGE.end - PORT_RANGE.start) {
+            let local_port = rng.gen_range(PORT_RANGE);
+            let table = self.sockets.read().unwrap();
+            if table.keys().all(|k| local_port != k.2) {
+                return Ok(local_port);
+            }
+        }
+        anyhow::bail!("no available port found.");
     }
 
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<SockID> {
