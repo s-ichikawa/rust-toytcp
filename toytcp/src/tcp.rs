@@ -56,13 +56,36 @@ impl TCP {
             addr,
             self.select_unused_port(&mut rng)?,
             port,
+            TcpStatus::SynSent,
         )?;
-        socket.send_tcp_packet(tcpflags::SYN, &[])?;
+        socket.send_param.initial_seq = rng.gen_range(1..1 << 31);
+        socket.send_tcp_packet(socket.send_param.initial_seq, 0, tcpflags::SYN, &[])?;
+        socket.send_param.unacked_seq = socket.send_param.initial_seq;
+        socket.send_param.next = socket.send_param.initial_seq + 1;
+        let mut table = self.sockets.write().unwrap();
         let sock_id = socket.get_socket_id();
+        table.insert(sock_id, socket);
+        // ロックを外してイベントの待機、受信スレッドがロックを取得で得きるようにするため.
+        drop(table);
+        self.wait_event(sock_id, TCPEventKind::ConnectionCompleted);
         Ok(sock_id)
     }
 }
 
 fn get_source_addr_to(addr: Ipv4Addr) -> Result<Ipv4Addr> {
-    Ok("10.0.0.1".parse().unwrap())
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!("ip route get {} | grep src", addr))
+        .output()?;
+    let mut output = str::from_utf8(&output.stdout)?
+        .trim()
+        .split_ascii_whitespace();
+    while let Some(s) = output.next() {
+        if s == "src" {
+            break;
+        }
+    }
+    let ip = output.next().context("failed to get src ip")?;
+    dbg!("source addr", ip);
+    ip.parse().context("failed to parse source ip")
 }
