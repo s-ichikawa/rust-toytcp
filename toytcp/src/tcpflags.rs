@@ -7,28 +7,32 @@ pub const RST: u8 = 1 << 2;
 pub const SYN: u8 = 1 << 1;
 pub const FIN: u8 = 1;
 
+/// TCP flagを文字列に変換する
 pub fn flag_to_string(flag: u8) -> String {
-    let mut flat_str = String::new();
+    let mut flag_str = String::new();
     if flag & SYN > 0 {
-        flat_str += "SYN ";
+        flag_str += "SYN ";
+    }
+    if flag & ACK > 0 {
+        flag_str += "ACK ";
     }
     if flag & FIN > 0 {
-        flat_str += "FIN ";
+        flag_str += "FIN ";
     }
     if flag & RST > 0 {
-        flat_str += "RST ";
+        flag_str += "RST ";
     }
     if flag & CWR > 0 {
-        flat_str += "CWR ";
+        flag_str += "CWR ";
     }
     if flag & ECE > 0 {
-        flat_str += "ECE ";
+        flag_str += "ECE ";
     }
     if flag & PSH > 0 {
-        flat_str += "PSH ";
+        flag_str += "PSH ";
     }
     if flag & URG > 0 {
-        flat_str += "URG ";
+        flag_str += "URG ";
     }
-    flat_str
+    flag_str
 }

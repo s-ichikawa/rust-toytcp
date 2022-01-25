@@ -5,10 +5,9 @@ use pnet::packet::{ip::IpNextHeaderProtocols, Packet};
 use pnet::transport::{self, TransportChannelType, TransportProtocol, TransportSender};
 use pnet::util;
 use std::collections::VecDeque;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::SystemTime;
-use pnet::packet::ip::IpNextHeaderProtocol;
 
 const SOCKET_BUFFER_SIZE: usize = 4380;
 
@@ -29,17 +28,23 @@ pub struct Socket {
 
 #[derive(Clone, Debug)]
 pub struct SendParam {
-    pub unacked_seq: u32,   // 送信後まだackされてないseqの先頭
-    pub next: u32,          // 次の送信
-    pub window: u16,        // 送信ウィンドウサイズ
+    pub unacked_seq: u32,
+    // 送信後まだackされてないseqの先頭
+    pub next: u32,
+    // 次の送信
+    pub window: u16,
+    // 送信ウィンドウサイズ
     pub initial_seq: u32,   // 初期送信seq
 }
 
 #[derive(Clone, Debug)]
 pub struct RecvParam {
-    pub next: u32,          // 次受信するseq
-    pub window: u16,        // 受信ウィンドウサイズ
-    pub initial_seq: u32,   // 初期受信seq
+    pub next: u32,
+    // 次受信するseq
+    pub window: u16,
+    // 受信ウィンドウサイズ
+    pub initial_seq: u32,
+    // 初期受信seq
     pub tail: u32,          // 受信seqの最後尾
 }
 
@@ -52,21 +57,21 @@ pub enum TcpStatus {
     FinWait1,
     FinWait2,
     TimeWait,
-    CloneWait,
+    CloseWait,
     LastAck,
 }
 
 impl Display for TcpStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TcpStatus::Listen => write!(f, "LISTEN"),
-            TcpStatus::SynSent=> write!(f, "SYNSENT"),
+            TcpStatus::SynSent => write!(f, "SYNSENT"),
             TcpStatus::SynRcvd => write!(f, "SYNRCVD"),
             TcpStatus::Established => write!(f, "ESTABLISHED"),
             TcpStatus::FinWait1 => write!(f, "FINWAIT1"),
             TcpStatus::FinWait2 => write!(f, "FINWAIT2"),
             TcpStatus::TimeWait => write!(f, "TIMEWAIT"),
-            TcpStatus::CloneWait => write!(f, "CLONEWAIT"),
+            TcpStatus::CloseWait => write!(f, "CLOSEWAIT"),
             TcpStatus::LastAck => write!(f, "LASTACK"),
         }
     }
@@ -90,7 +95,7 @@ impl Socket {
             local_port,
             remote_port,
             send_param: SendParam {
-              unacked_seq: 0,
+                unacked_seq: 0,
                 initial_seq: 0,
                 next: 0,
                 window: SOCKET_BUFFER_SIZE as u16,
@@ -118,6 +123,7 @@ impl Socket {
         tcp_packet.set_dest(self.remote_port);
         tcp_packet.set_seq(seq);
         tcp_packet.set_ack(ack);
+        tcp_packet.set_data_offset(5);
         tcp_packet.set_flag(flag);
         tcp_packet.set_window_size(self.recv_param.window);
         tcp_packet.set_payload(payload);
@@ -133,11 +139,12 @@ impl Socket {
             .sender
             .send_to(tcp_packet.clone(), IpAddr::V4(self.remote_addr))
             .context(format!("failed to send: \n{:?}", tcp_packet))?;
+
         dbg!("sent", &tcp_packet);
         Ok(sent_size)
     }
 
-    pub fn get_socket_id(&self) -> SockID {
+    pub fn get_sock_id(&self) -> SockID {
         SockID(
             self.local_addr,
             self.remote_addr,

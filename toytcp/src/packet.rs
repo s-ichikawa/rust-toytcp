@@ -2,7 +2,7 @@ use crate::tcpflags;
 use pnet::packet::{ip::IpNextHeaderProtocols, tcp::TcpPacket, Packet};
 use pnet::util;
 
-use std::fmt::{self, Debug, Formatter};
+use std::fmt::{self, Debug};
 use std::net::Ipv4Addr;
 
 const TCP_HEADER_SIZE: usize = 20;
@@ -13,9 +13,9 @@ pub struct TCPPacket {
 }
 
 impl TCPPacket {
-    pub fn new(payload_let: usize) -> Self {
+    pub fn new(payload_len: usize) -> Self {
         Self {
-            buffer: vec![0; TCP_HEADER_SIZE + payload_let],
+            buffer: vec![0; TCP_HEADER_SIZE + payload_len],
         }
     }
 
@@ -116,7 +116,7 @@ impl Packet for TCPPacket {
 }
 
 impl Debug for TCPPacket {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             r"
@@ -136,7 +136,6 @@ impl<'a> From<TcpPacket<'a>> for TCPPacket {
     fn from(packet: TcpPacket) -> Self {
        Self {
            buffer: packet.packet().to_vec(),
-
        }
     }
 }
