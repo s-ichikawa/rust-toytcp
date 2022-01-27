@@ -44,3 +44,15 @@ listening on host1-veth1, link-type EN10MB (Ethernet), capture size 262144 bytes
 $ docker exec -it 8e840c8a655d ip netns exec host1 /user/rust-tcp/src/toytcp/target/debug/examples/echoclient 10.0.1.1 40000
 
 ```
+
+# Memo
+
+## 3.5.9 動作確認のncコマンドのオプションが違う
+
+```shell
+# 本に書かれてるコマンド
+$ sudo ip netns exec host2 nc -l 10.0.1.1.40000
+
+# こうすると動いた
+$ ip netns exec host2 nc -l -p 40000
+```
