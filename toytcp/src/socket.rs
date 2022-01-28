@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 const SOCKET_BUFFER_SIZE: usize = 4380;
 
-/// (local_addr, remote_addr, local_port, remote_port)のタブルでソケットを識別する
+/// (local_addr, remote_addr, local_port, remote_port)のタプルでソケットを識別する．
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct SockID(pub Ipv4Addr, pub Ipv4Addr, pub u16, pub u16);
 
@@ -24,32 +24,10 @@ pub struct Socket {
     pub recv_param: RecvParam,
     pub status: TcpStatus,
     pub recv_buffer: Vec<u8>,
-    pub sender: TransportSender,
     pub retransmission_queue: VecDeque<RetransmissionQueueEntry>,
-    pub connected_connection_queue: VecDeque<SockID>,
-    pub listening_socket: Option<SockID>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SendParam {
-    pub unacked_seq: u32,
-    // 送信後まだackされてないseqの先頭
-    pub next: u32,
-    // 次の送信
-    pub window: u16,
-    // 送信ウィンドウサイズ
-    pub initial_seq: u32,   // 初期送信seq
-}
-
-#[derive(Clone, Debug)]
-pub struct RecvParam {
-    pub next: u32,
-    // 次受信するseq
-    pub window: u16,
-    // 受信ウィンドウサイズ
-    pub initial_seq: u32,
-    // 初期受信seq
-    pub tail: u32,          // 受信seqの最後尾
+    pub connected_connection_queue: VecDeque<SockID>, // 接続済みソケットを保持するキュー．リスニングソケットのみ使用．
+    pub listening_socket: Option<SockID>, // 生成元のリスニングソケット．接続済みソケットのみ使用
+    pub sender: TransportSender,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +45,22 @@ impl RetransmissionQueueEntry {
             transmission_count: 1,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SendParam {
+    pub unacked_seq: u32, // 送信後まだackされていないseqの先頭
+    pub next: u32,        // 次の送信
+    pub window: u16,      // 送信ウィンドウサイズ
+    pub initial_seq: u32, // 初期送信seq
+}
+
+#[derive(Clone, Debug)]
+pub struct RecvParam {
+    pub next: u32,        // 次受信するseq
+    pub window: u16,      // 受信ウィンドウ
+    pub initial_seq: u32, // 初期受信seq
+    pub tail: u32,        // 受信seqの最後尾
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -127,12 +121,12 @@ impl Socket {
                 window: SOCKET_BUFFER_SIZE as u16,
                 tail: 0,
             },
+            status,
             recv_buffer: vec![0; SOCKET_BUFFER_SIZE],
             retransmission_queue: VecDeque::new(),
-            status,
-            sender,
             connected_connection_queue: VecDeque::new(),
             listening_socket: None,
+            sender,
         })
     }
 
@@ -166,11 +160,11 @@ impl Socket {
             .context(format!("failed to send: \n{:?}", tcp_packet))?;
 
         dbg!("sent", &tcp_packet);
-
         if payload.is_empty() && tcp_packet.get_flag() == tcpflags::ACK {
             return Ok(sent_size);
         }
-        self.retransmission_queue.push_back(RetransmissionQueueEntry::new(tcp_packet));
+        self.retransmission_queue
+            .push_back(RetransmissionQueueEntry::new(tcp_packet));
         Ok(sent_size)
     }
 

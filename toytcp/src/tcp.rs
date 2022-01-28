@@ -74,6 +74,11 @@ impl TCP {
                         dbg!("successfully acked", item.packet.get_seq());
                         socket.send_param.window += item.packet.payload().len() as u16;
                         self.publish_event(*sock_id, TCPEventKind::Acked);
+                        if item.packet.get_flag() & tcpflags::FIN > 0
+                            && socket.status == TcpStatus::LastAck
+                        {
+                            self.publish_event(*sock_id, TCPEventKind::ConnectionClosed);
+                        }
                         continue;
                     }
                     // タイムアウトを確認
@@ -94,12 +99,44 @@ impl TCP {
                         break;
                     } else {
                         dbg!("reached MAX_TRANSMITTION");
+                        if item.packet.get_flag() & tcpflags::FIN > 0
+                            && (socket.status == TcpStatus::LastAck
+                            || socket.status == TcpStatus::FinWait1
+                            || socket.status == TcpStatus::FinWait2) {
+                            self.publish_event(*sock_id, TCPEventKind::ConnectionClosed);
+                        }
                     }
                 }
             }
             drop(table);
             thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    pub fn listen(&self, local_addr: Ipv4Addr, local_port: u16) -> Result<SockID> {
+        let socket = Socket::new(
+            local_addr,
+            UNDETERMINED_IP_ADDR, // まだ接続先IPアドレスは未定
+            local_port,
+            UNDETERMINED_PORT, // まだ接続先ポート番号は未定
+            TcpStatus::Listen,
+        )?;
+        let mut lock = self.sockets.write().unwrap();
+        let sock_id = socket.get_sock_id();
+        lock.insert(sock_id, socket);
+        Ok(sock_id)
+    }
+
+    pub fn accept(&self, socket_id: SockID) -> Result<SockID> {
+        self.wait_event(socket_id, TCPEventKind::ConnectionCompleted);
+
+        let mut table = self.sockets.write().unwrap();
+        Ok(table
+            .get_mut(&socket_id)
+            .context(format!("no such socket: {:?}", socket_id))?
+            .connected_connection_queue
+            .pop_front()
+            .context("no connected socket")?)
     }
 
     /// 未使用のポート番号を探して返す
@@ -137,52 +174,54 @@ impl TCP {
         Ok(sock_id)
     }
 
-    pub fn listen(&self, local_addr: Ipv4Addr, local_port: u16) -> Result<SockID> {
-        let socket = Socket::new(
-            local_addr,
-            UNDETERMINED_IP_ADDR,
-            local_port,
-            UNDETERMINED_PORT,
-            TcpStatus::Listen,
-        )?;
-        let mut lock = self.sockets.write().unwrap();
-        let socket_id = socket.get_sock_id();
-        lock.insert(socket_id, socket);
-        Ok(socket_id)
-    }
-
-    pub fn accept(&self, socket_id: SockID) -> Result<SockID> {
-        self.wait_event(socket_id, TCPEventKind::ConnectionCompleted);
-
+    pub fn recv(&self, sock_id: SockID, buffer: &mut [u8]) -> Result<usize> {
         let mut table = self.sockets.write().unwrap();
-        Ok(table
-            .get_mut(&socket_id)
-            .context(format!("no such socket: {:?}", socket_id))?
-            .connected_connection_queue
-            .pop_front()
-            .context("no connected socket")?)
+        let mut socket = table
+            .get_mut(&sock_id)
+            .context(format!("no such socket: {:?}", sock_id))?;
+        let mut received_size = socket.recv_buffer.len() - socket.recv_param.window as usize;
+        while received_size == 0 {
+            match socket.status {
+                TcpStatus::CloseWait | TcpStatus::LastAck | TcpStatus::TimeWait => break,
+                _ => {}
+            }
+            drop(table);
+            dbg!("waiting incoming data");
+            self.wait_event(sock_id, TCPEventKind::DataArrived);
+            table = self.sockets.write().unwrap();
+            socket = table
+                .get_mut(&sock_id)
+                .context(format!("no such socket: {:?}", sock_id))?;
+            received_size = socket.recv_buffer.len() - socket.recv_param.window as usize;
+        }
+        let copy_size = cmp::min(buffer.len(), received_size);
+        buffer[..copy_size].copy_from_slice(&socket.recv_buffer[..copy_size]);
+        socket.recv_buffer.copy_within(copy_size.., 0);
+        socket.recv_param.window += copy_size as u16;
+        Ok(copy_size)
     }
 
-    pub fn send(&self, socket_id: SockID, buffer: &[u8]) -> Result<()> {
+    pub fn send(&self, sock_id: SockID, buffer: &[u8]) -> Result<()> {
         let mut cursor = 0;
         while cursor < buffer.len() {
             let mut table = self.sockets.write().unwrap();
             let mut socket = table
-                .get_mut(&socket_id)
-                .context(format!("no such socket: {:?}", socket_id))?;
+                .get_mut(&sock_id)
+                .context(format!("no such socket: {:?}", sock_id))?;
             let mut send_size = cmp::min(
                 MSS,
                 cmp::min(socket.send_param.window as usize, buffer.len() - cursor),
             );
             while send_size == 0 {
                 dbg!("unable to slide send window");
-                // ロックを外してイベントの待機、受信スレッドがロックを取得できるようにするため
+                // ロックを外してイベントの待機．受信スレッドがロックを取得できるようにするため．
                 drop(table);
-                self.wait_event(socket_id, TCPEventKind::Acked);
+                self.wait_event(sock_id, TCPEventKind::Acked);
                 table = self.sockets.write().unwrap();
                 socket = table
-                    .get_mut(&socket_id)
-                    .context(format!("no such socket: {:?}", socket_id))?;
+                    .get_mut(&sock_id)
+                    .context(format!("no such socket: {:?}", sock_id))?;
+                // 送信サイズを再計算する
                 send_size = cmp::min(
                     MSS,
                     cmp::min(socket.send_param.window as usize, buffer.len() - cursor),
@@ -198,33 +237,49 @@ impl TCP {
             cursor += send_size;
             socket.send_param.next += send_size as u32;
             socket.send_param.window -= send_size as u16;
+            // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
+            // send_windowが0になるまで送り続け，送信がブロックされる確率を下げるため
             drop(table);
             thread::sleep(Duration::from_millis(1));
         }
         Ok(())
     }
 
-    pub fn recv(&self, sock_id: SockID, buffer: &mut [u8]) -> Result<usize> {
+    pub fn close(&self, sock_id: SockID) -> Result<()> {
         let mut table = self.sockets.write().unwrap();
         let mut socket = table
             .get_mut(&sock_id)
             .context(format!("no such socket: {:?}", sock_id))?;
-        let mut received_size = socket.recv_buffer.len() - socket.recv_param.window as usize;
-        while received_size == 0 {
-            drop(table);
-            dbg!("waiting incoming data");
-            self.wait_event(sock_id, TCPEventKind::DataArrived);
-            table = self.sockets.write().unwrap();
-            socket = table
-                .get_mut(&sock_id)
-                .context(format!("no such socket: {:?}", sock_id))?;
-            received_size = socket.recv_buffer.len() - socket.recv_param.window as usize;
+        socket.send_tcp_packet(
+            socket.send_param.next,
+            socket.recv_param.next,
+            tcpflags::FIN | tcpflags::ACK,
+            &[],
+        )?;
+        socket.send_param.next += 1;
+        match socket.status {
+            TcpStatus::Established => {
+                socket.status = TcpStatus::FinWait1;
+                drop(table);
+                self.wait_event(sock_id, TCPEventKind::ConnectionClosed);
+                let mut table = self.sockets.write().unwrap();
+                table.remove(&sock_id);
+                dbg!("closed & removed", sock_id);
+            }
+            TcpStatus::CloseWait => {
+                socket.status = TcpStatus::LastAck;
+                drop(table);
+                self.wait_event(sock_id, TCPEventKind::ConnectionClosed);
+                let mut table = self.sockets.write().unwrap();
+                table.remove(&sock_id);
+                dbg!("closed & removed", sock_id);
+            }
+            TcpStatus::Listen => {
+                table.remove(&sock_id);
+            }
+            _ => return Ok(()),
         }
-        let copy_size = cmp::min(buffer.len(), received_size);
-        buffer[..copy_size].copy_from_slice(&socket.recv_buffer[..copy_size]);
-        socket.recv_buffer.copy_within(copy_size.., 0);
-        socket.recv_param.window += copy_size as u16;
-        Ok(copy_size)
+        Ok(())
     }
 
     /// 指定したソケットIDと種別のイベントを待機
@@ -302,6 +357,8 @@ impl TCP {
                 TcpStatus::SynRcvd => self.synrcvd_handler(table, sock_id, &packet),
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
                 TcpStatus::Established => self.established_handler(socket, &packet),
+                TcpStatus::CloseWait | TcpStatus::LastAck => self.close_handler(socket, &packet),
+                TcpStatus::FinWait1 | TcpStatus::FinWait2 => self.finwait_handler(socket, &packet),
                 _ => {
                     dbg!("not implemented state");
                     Ok(())
@@ -310,64 +367,6 @@ impl TCP {
                 dbg!(error);
             }
         }
-    }
-
-    fn delete_acked_segment_from_retransmission_queue(&self, socket: &mut Socket) {
-        dbg!("ack accept", socket.send_param.unacked_seq);
-        while let Some(item) = socket.retransmission_queue.pop_front() {
-            if socket.send_param.unacked_seq > item.packet.get_seq() {
-                dbg!("successfully acked", item.packet.get_seq());
-                socket.send_param.window += item.packet.payload().len() as u16;
-                self.publish_event(socket.get_sock_id(), TCPEventKind::Acked);
-            } else {
-                socket.retransmission_queue.push_front(item);
-                break;
-            }
-        }
-    }
-
-    fn established_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
-        dbg!("extablished handler");
-        if socket.send_param.unacked_seq < packet.get_ack()
-            && packet.get_ack() <= socket.send_param.next {
-            socket.send_param.unacked_seq = packet.get_ack();
-            self.delete_acked_segment_from_retransmission_queue(socket);
-        } else if socket.send_param.next < packet.get_ack() {
-            return Ok(());
-        }
-        if packet.get_flag() & tcpflags::ACK == 0 {
-            return Ok(());
-        }
-        if !packet.payload().is_empty() {
-            self.process_payload(socket, &packet)?;
-        }
-        Ok(())
-    }
-
-    fn process_payload(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
-        let offset = socket.recv_buffer.len() - socket.recv_param.window as usize
-            + (packet.get_seq() - socket.recv_param.next) as usize;
-        let copy_size = cmp::min(packet.payload().len(), socket.recv_buffer.len() - offset);
-        socket.recv_buffer[offset..offset + copy_size]
-            .copy_from_slice(&packet.payload()[..copy_size]);
-        socket.recv_param.tail = cmp::max(socket.recv_param.tail, packet.get_seq() + copy_size as u32);
-
-        if packet.get_seq() == socket.recv_param.next {
-            socket.recv_param.next = socket.recv_param.tail;
-            socket.recv_param.window -= (socket.recv_param.tail - packet.get_seq()) as u16;
-        }
-        if copy_size > 0 {
-            socket.send_tcp_packet(
-                socket.send_param.next,
-                socket.recv_param.next,
-                tcpflags::ACK,
-                &[],
-            )?;
-        } else {
-            dbg!("recv buffer overflow");
-        }
-        self.publish_event(socket.get_sock_id(), TCPEventKind::DataArrived);
-        Ok(())
     }
 
     fn listen_handler(
@@ -468,6 +467,119 @@ impl TCP {
                 )?;
                 dbg!("status: synsent ->", &socket.status);
             }
+        }
+        Ok(())
+    }
+
+    fn delete_acked_segment_from_retransmission_queue(&self, socket: &mut Socket) {
+        dbg!("ack accept", socket.send_param.unacked_seq);
+        while let Some(item) = socket.retransmission_queue.pop_front() {
+            if socket.send_param.unacked_seq > item.packet.get_seq() {
+                dbg!("successfully acked", item.packet.get_seq());
+                socket.send_param.window += item.packet.payload().len() as u16;
+                self.publish_event(socket.get_sock_id(), TCPEventKind::Acked);
+            } else {
+                socket.retransmission_queue.push_front(item);
+                break;
+            }
+        }
+    }
+
+    fn established_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        dbg!("extablished handler");
+        if socket.send_param.unacked_seq < packet.get_ack()
+            && packet.get_ack() <= socket.send_param.next {
+            socket.send_param.unacked_seq = packet.get_ack();
+            self.delete_acked_segment_from_retransmission_queue(socket);
+        } else if socket.send_param.next < packet.get_ack() {
+            return Ok(());
+        }
+        if packet.get_flag() & tcpflags::ACK == 0 {
+            return Ok(());
+        }
+        if !packet.payload().is_empty() {
+            self.process_payload(socket, &packet)?;
+        }
+        if packet.get_flag() & tcpflags::FIN > 0 {
+            socket.recv_param.next = packet.get_seq() + 1;
+            socket.send_tcp_packet(
+                socket.send_param.next,
+                socket.recv_param.next,
+                tcpflags::ACK,
+                &[],
+            )?;
+            socket.status = TcpStatus::CloseWait;
+            self.publish_event(socket.get_sock_id(), TCPEventKind::DataArrived);
+        }
+        Ok(())
+    }
+
+    fn process_payload(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        let offset = socket.recv_buffer.len() - socket.recv_param.window as usize
+            + (packet.get_seq() - socket.recv_param.next) as usize;
+        let copy_size = cmp::min(packet.payload().len(), socket.recv_buffer.len() - offset);
+        socket.recv_buffer[offset..offset + copy_size]
+            .copy_from_slice(&packet.payload()[..copy_size]);
+        socket.recv_param.tail = cmp::max(socket.recv_param.tail, packet.get_seq() + copy_size as u32);
+
+        if packet.get_seq() == socket.recv_param.next {
+            socket.recv_param.next = socket.recv_param.tail;
+            socket.recv_param.window -= (socket.recv_param.tail - packet.get_seq()) as u16;
+        }
+        if copy_size > 0 {
+            socket.send_tcp_packet(
+                socket.send_param.next,
+                socket.recv_param.next,
+                tcpflags::ACK,
+                &[],
+            )?;
+        } else {
+            dbg!("recv buffer overflow");
+        }
+        self.publish_event(socket.get_sock_id(), TCPEventKind::DataArrived);
+        Ok(())
+    }
+
+
+    fn close_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        dbg!("closewait | lastack handler");
+        socket.send_param.unacked_seq = packet.get_ack();
+        Ok(())
+    }
+
+    fn finwait_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        dbg!("finwait handler");
+        if socket.send_param.unacked_seq < packet.get_ack()
+            && packet.get_ack() <= socket.send_param.next
+        {
+            socket.send_param.unacked_seq = packet.get_ack();
+            self.delete_acked_segment_from_retransmission_queue(socket);
+        } else if socket.send_param.next < packet.get_ack() {
+            return Ok(());
+        }
+        if packet.get_flag() & tcpflags::ACK == 0 {
+            return Ok(());
+        }
+        if !packet.payload().is_empty() {
+            self.process_payload(socket, &packet)?;
+        }
+
+        if socket.status == TcpStatus::FinWait1
+            && socket.send_param.next == socket.send_param.unacked_seq
+        {
+            socket.status = TcpStatus::FinWait2;
+            dbg!("status: finwait1 ->", &socket.status);
+        }
+
+        if packet.get_flag() & tcpflags::FIN > 0 {
+            socket.recv_param.next += 1;
+            socket.send_tcp_packet(
+                socket.send_param.next,
+                socket.recv_param.next,
+                tcpflags::ACK,
+                &[],
+            )?;
+            self.publish_event(socket.get_sock_id(), TCPEventKind::ConnectionClosed);
         }
         Ok(())
     }
