@@ -120,6 +120,26 @@ impl TCP {
             .context("no connected socket")?)
     }
 
+    pub fn send(&self, socket_id: SockID, buffer: &[u8]) -> Result<()> {
+        let mut cursor = 0;
+        while cursor < buffer.len() {
+            let mut table = self.sockets.write().unwrap();
+            let mut socket = table
+                .get_mut(&socket_id)
+                .context(format!("no such socket: {:?}", socket_id))?;
+            let send_size = cmp::min(MSS, buffer.len() - cursor);
+            socket.send_tcp_packet(
+                socket.send_param.next,
+                socket.recv_param.next,
+                tcpflags::ACK,
+                &buffer[cursor..cursor + send_size],
+            )?;
+            cursor += send_size;
+            socket.send_param.next += send_size as u32;
+        }
+        Ok(())
+    }
+
     /// 指定したソケットIDと種別のイベントを待機
     fn wait_event(&self, sock_id: SockID, kind: TCPEventKind) {
         let (lock, cvar) = &self.event_condvar;
