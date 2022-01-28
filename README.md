@@ -45,6 +45,17 @@ $ docker exec -it 8e840c8a655d ip netns exec host1 /user/rust-tcp/src/toytcp/tar
 
 ```
 
+## File Server/Client
+
+```shell
+# client
+# ip netns exec host1 ./target/debug/examples/fileclient 10.0.1.1 40000 sea.jpg
+
+# server
+# ip netns exec host2 ./target/debug/examples/fileserver 10.0.1.1 40000 saved.jpg
+
+```
+
 # Memo
 
 ## 3.5.9 動作確認のncコマンドのオプションが違う
@@ -56,3 +67,15 @@ $ sudo ip netns exec host2 nc -l 10.0.1.1.40000
 # こうすると動いた
 $ ip netns exec host2 nc -l -p 40000
 ```
+
+## File Serverは不安定
+
+こんな感じのエラーが出てしばしば落ちるけど、何度か試すと時々成功する。謎。。
+```shell
+# ip netns exec host2 ./target/debug/examples/fileserver 10.0.1.1 40000 saved.jpg
+...
+thread '<unnamed>' panicked at 'attempt to subtract with overflow', src/tcp.rs:520:58
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: PoisonError { .. }', src/tcp.rs:191:42
+```
+時々成功する
