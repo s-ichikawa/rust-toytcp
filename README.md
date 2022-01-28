@@ -78,4 +78,5 @@ thread '<unnamed>' panicked at 'attempt to subtract with overflow', src/tcp.rs:5
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: PoisonError { .. }', src/tcp.rs:191:42
 ```
-時々成功する
+
+sendでsleepさせる時間を5msecにすると高確率で成功するようになった

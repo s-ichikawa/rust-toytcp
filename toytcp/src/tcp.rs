@@ -240,7 +240,7 @@ impl TCP {
             // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
             // send_windowが0になるまで送り続け，送信がブロックされる確率を下げるため
             drop(table);
-            thread::sleep(Duration::from_millis(1));
+            thread::sleep(Duration::from_millis(5));
         }
         Ok(())
     }
