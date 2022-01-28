@@ -17,5 +17,20 @@ fn echo_server(local_addr: Ipv4Addr, port: u16) -> Result<()> {
     loop {
         let connected_socket = tcp.accept(listening_socket)?;
         dbg!("accepted!", connected_socket.1, connected_socket.3);
+        let cloned_tcp = tcp.clone();
+
+        std::thread::spawn(move || {
+            let mut buffer = [0; 1014];
+            loop {
+                let nbyte = cloned_tcp.recv(connected_socket, &mut buffer).unwrap();
+                if nbyte == 0 {
+                    return;
+                }
+                print!("> {}", str::from_utf8(&buffer[..nbyte]).unwrap());
+                cloned_tcp
+                    .send(connected_socket, &buffer[..nbyte])
+                    .unwrap();
+            }
+        });
     }
 }
